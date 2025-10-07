@@ -1,4 +1,8 @@
 import os
+import sys
+import shutil
+import subprocess
+import time
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -23,6 +27,51 @@ st.markdown("""
 .neutral-sentiment  { color:#ffc107; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ---------------- Orchestration (Scrape → Ingest → Notify) ----------------
+def rotate_snapshots():
+    """Copy today's CSVs to yesterday snapshots for diff-based notifications."""
+    try:
+        os.makedirs("My_docs", exist_ok=True)
+        src_dst_pairs = [
+            ("My_docs/mobile.csv", "My_docs/mobile_yesterday.csv"),
+            ("My_docs/review.csv", "My_docs/review_yesterday.csv"),
+        ]
+        for src, dst in src_dst_pairs:
+            if os.path.exists(src):
+                shutil.copyfile(src, dst)
+    except Exception as e:
+        st.warning(f"Snapshot rotation issue: {e}")
+
+
+def run_script(path):
+    """Run a Python script with the current interpreter; surface concise errors."""
+    try:
+        subprocess.run([sys.executable, path], check=True)
+    except subprocess.CalledProcessError as e:
+        st.error(f"Failed running {path}: {e}")
+        raise
+
+
+def trigger_notifications():
+    try:
+        import notification as notif
+        notif.check_price_drops()
+        notif.check_negative_reviews()
+    except Exception as e:
+        st.warning(f"Notifications step encountered an issue: {e}")
+
+
+def orchestrate_pipeline():
+    """End-to-end run: rotate → scrape → ingest → notify. Runs once per session."""
+    with st.spinner("Preparing latest data (scrape → ingest → notify)..."):
+        rotate_snapshots()
+        run_script("product.py")
+        run_script("ingestion.py")
+        # small pause to ensure files are flushed
+        time.sleep(0.5)
+        trigger_notifications()
 
 
 # ---------------- Competitor Analyzer ----------------
@@ -153,7 +202,6 @@ def competitor_comparison(analyzer, product_name):
     """Compare product with competitors in same source and nearby price range."""
     st.markdown('<div class="section-header">Competitor Comparison</div>', unsafe_allow_html=True)
 
-    # Competitors: same source, different product
     source = analyzer.products_df.query("product_name==@product_name")["source"].iloc[0]
     comp = analyzer.products_df.query("source==@source and product_name!=@product_name")
     if comp.empty:
@@ -168,7 +216,7 @@ def competitor_comparison(analyzer, product_name):
     # Competitor table
     st.dataframe(comp[["product_name", "price", "discount", "rating", "url"]])
 
-    # Interactive selection for nearby products
+    # Interactive selection
     st.markdown("### Explore Competitors Near Selected Product Price")
     selected_product = st.selectbox("Select competitor product", comp["product_name"].unique())
 
@@ -176,29 +224,21 @@ def competitor_comparison(analyzer, product_name):
         selected_price = comp.query("product_name==@selected_product")["price"].values[0]
         st.markdown(f"*Showing products around ₹{selected_price}*")
 
-        # Price range ±20%
         lower_bound, upper_bound = selected_price * 0.8, selected_price * 1.2
-
-        # Products in range
         nearby_products = analyzer.products_df.query(
             "price >= @lower_bound and price <= @upper_bound"
         ).copy()
 
-        # Attach sentiment scores
         sentiment_scores = []
         for prod in nearby_products["product_name"]:
             sentiment_info = analyzer.get_sentiment_analysis(prod)
             sentiment_scores.append(sentiment_info["average_sentiment_score"] if sentiment_info else np.nan)
         nearby_products["avg_sentiment"] = sentiment_scores
-
-        # Sort by sentiment
         nearby_products.sort_values(by="avg_sentiment", ascending=False, inplace=True)
 
-        # Display comparison table
         cols = ["product_name", "source", "price", "discount", "rating", "avg_sentiment", "url"]
         st.dataframe(nearby_products[cols])
 
-        # Show cross-source info for selected product
         same_product_sources = analyzer.products_df.query("product_name==@selected_product")
         st.markdown(f"'{selected_product}' Price & Discount Across Sources:")
         st.dataframe(same_product_sources[["source", "price", "discount", "rating", "url"]])
@@ -208,7 +248,6 @@ def strategic_recommendations(analyzer, product_name):
     """Generate pricing, discount, sentiment, and review-based strategy suggestions."""
     st.markdown('<div class="section-header">Strategic Recommendations</div>', unsafe_allow_html=True)
 
-    # Get product + sentiment info
     prod = analyzer.products_df.query("product_name==@product_name").iloc[0]
     sdata = analyzer.get_sentiment_analysis(product_name)
     avg_score = sdata["average_sentiment_score"] if sdata else 0
@@ -216,19 +255,16 @@ def strategic_recommendations(analyzer, product_name):
 
     strategy_lines = []
 
-    # Pricing strategy
     if prod["price"] > 50000:
         strategy_lines.append(f"- High price (₹{prod['price']}). Consider limited-time discounts or EMI options.")
     elif prod["price"] < 20000:
         strategy_lines.append(f"- Competitive price (₹{prod['price']}) can be marketed aggressively.")
 
-    # Discount strategy
     if prod["discount"] < 5:
         strategy_lines.append(f"- Low discount ({prod['discount']}%). Increase for better customer pull.")
     elif prod["discount"] > 20:
         strategy_lines.append(f"- High discount ({prod['discount']}%). Maintain during campaigns.")
 
-    # Sentiment strategy
     if avg_score < 0:
         strategy_lines.append("- Negative sentiment detected. Investigate recurring complaints.")
     elif avg_score < 0.2:
@@ -236,13 +272,11 @@ def strategic_recommendations(analyzer, product_name):
     else:
         strategy_lines.append("- Positive sentiment! Highlight strengths in campaigns.")
 
-    # Review volume strategy
     if total_reviews < 10:
         strategy_lines.append("- Very few reviews. Encourage customers to share feedback.")
     elif total_reviews > 100:
         strategy_lines.append("- High review volume. Mine insights for product improvements.")
 
-    # Sentiment status indicator
     sentiment_status = "Needs Improvement" if avg_score < 0.2 else "Good" if avg_score < 0.5 else "Excellent"
     sentiment_class = "negative-sentiment" if avg_score < 0.2 else "neutral-sentiment" if avg_score < 0.5 else "positive-sentiment"
 
@@ -255,21 +289,47 @@ def strategic_recommendations(analyzer, product_name):
     st.markdown("\n".join(strategy_lines))
 
 
+def notifications_section(notifications_file="data/notifications.csv"):
+    """Show alerts logged by notification system."""
+    st.markdown('<div class="section-header">Notifications</div>', unsafe_allow_html=True)
+
+    if not os.path.exists(notifications_file):
+        st.info("No notifications available yet.")
+        return
+
+    df = pd.read_csv(notifications_file)
+    if df.empty:
+        st.info("No notifications to display.")
+        return
+
+    st.dataframe(df)
+
+    # Highlight last 5 alerts
+    st.markdown("### Recent Alerts")
+    for _, row in df.tail(5).iterrows():
+        st.write(f"- **[{row['timestamp']}]** {row['message']}")
+
+
 # ---------------- Main App ----------------
 def main():
     """Main entry point for Streamlit dashboard."""
     st.markdown('<div class="main-header">E-Commerce Competitor Strategy Dashboard</div>',
                 unsafe_allow_html=True)
 
+    # Run the end-to-end pipeline once per session
+    if "pipeline_initialized" not in st.session_state:
+        orchestrate_pipeline()
+        st.session_state["pipeline_initialized"] = True
+
     analyzer = CompetitorAnalyzer()
     if not analyzer.load_data():
         st.stop()
 
-    # Sidebar navigation
     section = st.sidebar.radio("Navigate", [
         "Product Analysis",
         "Competitor Comparison",
-        "Strategic Recommendations"
+        "Strategic Recommendations",
+        "Notifications"
     ])
     product = st.sidebar.selectbox("Select Product", analyzer.products_df["product_name"].unique())
 
@@ -277,8 +337,10 @@ def main():
         product_analysis(analyzer, product)
     elif section == "Competitor Comparison":
         competitor_comparison(analyzer, product)
-    else:
+    elif section == "Strategic Recommendations":
         strategic_recommendations(analyzer, product)
+    elif section == "Notifications":
+        notifications_section()
 
 
 if __name__ == "__main__":
