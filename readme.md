@@ -68,8 +68,8 @@ infosys_internship/
 1. **Clone the repository**
 
    ```bash
-  git clone https://github.com/HebbatamNithinkumarreddy/infosysinternship.git
-  cd infosysinternship
+  git clone https://github.com/HebbatamNithinkumarreddy/infosysprojectonline6.git
+  cd infosysprojectonline6
    ```
 
 2. **(Optional) Create a virtual environment**
