@@ -68,8 +68,8 @@ infosys_internship/
 1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/Madhu-0007/infosys_internship.git
-   cd infosys_internship
+  git clone https://github.com/HebbatamNithinkumarreddy/infosysinternship.git
+  cd infosysinternship
    ```
 
 2. **(Optional) Create a virtual environment**
@@ -137,4 +137,7 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## 👤 Contact
 
-Developed by [Madhu-0007](https://github.com/Madhu-0007).
+Developed by [HebbatamNithinkumarreddy](https://github.com/HebbatamNithinkumarreddy)
+
+
+
