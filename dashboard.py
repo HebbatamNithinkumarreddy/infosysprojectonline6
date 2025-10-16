@@ -8,6 +8,7 @@ import streamlit as st
 import plotly.express as px
 import numpy as np
 from textblob import TextBlob
+import joblib
 
 # ---------------- Streamlit Page Config ----------------
 st.set_page_config(
@@ -33,10 +34,10 @@ st.markdown("""
 def rotate_snapshots():
     """Copy today's CSVs to yesterday snapshots for diff-based notifications."""
     try:
-        os.makedirs("My_docs", exist_ok=True)
+        os.makedirs("my_docs", exist_ok=True)
         src_dst_pairs = [
-            ("My_docs/mobile.csv", "My_docs/mobile_yesterday.csv"),
-            ("My_docs/review.csv", "My_docs/review_yesterday.csv"),
+            ("my_docs/mobile.csv", "my_docs/mobile_yesterday.csv"),
+            ("my_docs/review.csv", "my_docs/review_yesterday.csv"),
         ]
         for src, dst in src_dst_pairs:
             if os.path.exists(src):
@@ -55,23 +56,45 @@ def run_script(path):
 
 
 def trigger_notifications():
+    print("DEBUG: trigger_notifications called from dashboard!")
     try:
         import notification as notif
-        notif.check_price_drops()
-        notif.check_negative_reviews()
+        sent_notification_ids = notif.get_sent_notification_ids()
+        notif.check_price_drops(sent_notification_ids)
+        notif.check_negative_reviews(sent_notification_ids)
+        notif.send_test_notification(lambda msg: st.info(msg))  # Show result in Streamlit UI
+        st.info("Notifications logic executed. Check console for debug output.")
     except Exception as e:
-        st.warning(f"Notifications step encountered an issue: {e}")
+        import traceback
+        st.error(f"Notifications step encountered an issue: {e}\n{traceback.format_exc()}")
 
 
 def orchestrate_pipeline():
-    """End-to-end run: rotate → scrape → ingest → notify. Runs once per session."""
-    with st.spinner("Preparing latest data (scrape → ingest → notify)..."):
+    with st.spinner("🔄 Starting pipeline..."):
+        # Step 1: Scraping
+        st.info("Step 1: Scraping product and review data...")
         rotate_snapshots()
         run_script("product.py")
+        st.success("✅ Scraping complete.")
+
+        # Step 2: Ingestion and ML model training
+        st.info("Step 2: Data ingestion, cleaning, and ML model training...")
         run_script("ingestion.py")
-        # small pause to ensure files are flushed
+        st.success("✅ Ingestion and ML model training complete.")
+
+        # Step 3: Sentiment analysis
+        st.info("Step 3: Sentiment analysis using OpenAI...")
+        run_script("sentiment.py")
+        st.success("✅ Sentiment analysis complete.")
+
+        # Step 4: Notifications
+        st.info("Step 4: Running notifications (price drops, negative reviews)...")
         time.sleep(0.5)
         trigger_notifications()
+        st.success("✅ Notifications sent.")
+
+        # Step 5: Dashboard will be displayed after login
+        st.info("Step 5: Dashboard ready. Please log in to continue.")
 
 
 # ---------------- Competitor Analyzer ----------------
@@ -82,7 +105,7 @@ class CompetitorAnalyzer:
 
     def load_data(self,
                   products_file="data/cleaned_mobile.csv",
-                  reviews_file="data/cleaned_reviews.csv") -> bool:
+                  reviews_file="reviews_with_sentiment.csv") -> bool:
         """Load cleaned product & review datasets, apply schema normalization."""
         try:
             # Load product data
@@ -100,7 +123,7 @@ class CompetitorAnalyzer:
                 st.error(f"Missing {products_file}")
                 return False
 
-            # Load review data
+            # Load review data (with OpenAI sentiment)
             if os.path.exists(reviews_file):
                 self.reviews_df = pd.read_csv(reviews_file)
                 self.reviews_df.rename(columns={
@@ -130,44 +153,58 @@ class CompetitorAnalyzer:
             st.error(f"Error loading data: {e}")
             return False
 
-    # ---------- Sentiment Analysis ----------
-    def analyze_sentiment(self, text):
-        """Classify text sentiment into positive, negative, or neutral."""
-        polarity = TextBlob(str(text)).sentiment.polarity
-        if polarity > 0.1:
-            return "positive", polarity
-        elif polarity < -0.1:
-            return "negative", polarity
-        else:
-            return "neutral", polarity
-
+    # ---------- Sentiment Analysis (OpenAI labels) ----------
     def get_sentiment_analysis(self, product_name):
-        """Return sentiment distribution & average score for a given product."""
+        """Return sentiment distribution for a given product using OpenAI labels."""
         df = self.reviews_df[self.reviews_df["product_name"] == product_name].copy()
-        if df.empty:
+        if df.empty or "sentiment" not in df.columns:
             return None
 
-        sentiments = []
-        for r in df["review_text"]:
-            s, sc = self.analyze_sentiment(r)
-            sentiments.append({"sentiment": s, "score": sc})
-        s_df = pd.DataFrame(sentiments)
+        # Map sentiment to scores for average calculation
+        sentiment_map = {"Positive": 1, "Neutral": 0, "Negative": -1,
+                         "positive": 1, "neutral": 0, "negative": -1}
+        df["sentiment_score"] = df["sentiment"].map(sentiment_map).fillna(0)
 
         return {
             "total_reviews": len(df),
-            "sentiment_distribution": s_df["sentiment"].value_counts().to_dict(),
-            "average_sentiment_score": s_df["score"].mean(),
+            "sentiment_distribution": df["sentiment"].value_counts().to_dict(),
+            "average_sentiment_score": df["sentiment_score"].mean(),
             "reviews_data": df
         }
 
 
+# Move ML prediction function outside the class
+def predict_price_lgbm(discount, rating):
+    try:
+        import pandas as pd
+        model = joblib.load("data/price_predictor_lgbm.joblib")
+        X_new = pd.DataFrame([[discount, rating]], columns=["discountoffering", "rating"])
+        pred = model.predict(X_new)[0]
+        return round(pred, 2)
+    except Exception as e:
+        st.warning(f"ML prediction error: {e}")
+        return None
+
+
 # ---------------- Dashboard Sections ----------------
 def product_analysis(analyzer, product_name):
-    """Display product metrics, sentiment distribution, and recent reviews."""
-    st.markdown('<div class="section-header">Product Analysis</div>', unsafe_allow_html=True)
-    prod = analyzer.products_df.query("product_name == @product_name").iloc[0]
+    st.info(f"🔍 Showing analysis for: {product_name}")
+    df = analyzer.products_df[analyzer.products_df["product_name"] == product_name]
+    if df.empty:
+        st.warning("No data available for this product.")
+        return
 
-    # Basic product metrics
+    # Show predicted price at the top
+    prod = df.iloc[0]
+    discount = prod["discount"]
+    rating = prod["rating"]
+    predicted_price = predict_price_lgbm(discount, rating)
+    if predicted_price is not None:
+        st.success(f"Predicted Price (LightGBM): ₹{predicted_price}")
+    else:
+        st.warning("Could not predict price for this product.")
+
+    # Show metrics and charts
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Price", f"₹{int(prod['price'])}")
     c2.metric("Discount", f"{prod['discount']}%")
@@ -178,25 +215,35 @@ def product_analysis(analyzer, product_name):
     st.subheader("Customer Sentiment")
     sdata = analyzer.get_sentiment_analysis(product_name)
     if sdata:
+        # Remove 'Parsing Error' from sentiment distribution if present
+        if 'Parsing Error' in sdata['sentiment_distribution']:
+            del sdata['sentiment_distribution']['Parsing Error']
+
         col1, col2 = st.columns([2, 1])
         with col1:
             fig = px.pie(values=list(sdata["sentiment_distribution"].values()),
                          names=list(sdata["sentiment_distribution"].keys()),
                          title="Sentiment Distribution")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, config={"responsive": True})
         with col2:
             st.metric("Total Reviews", sdata["total_reviews"])
             st.metric("Avg Sentiment Score", f"{sdata['average_sentiment_score']:.2f}")
 
         st.markdown("### Recent Reviews")
         for _, r in sdata["reviews_data"].head(5).iterrows():
-            sent, sc = analyzer.analyze_sentiment(r["review_text"])
+            sent = r["sentiment"]
+            sc = r.get("sentiment_score", 0)
             with st.expander(f"{r['userid']} - Rating: {r['rating']}"):
                 st.write(r["review_text"])
-                st.write(f"Sentiment: *{sent}* (score {sc:.2f})")
+                st.write(f"Sentiment: {sent} (score {sc:.2f})")
     else:
         st.info("No reviews available.")
 
+    # Show product table at the bottom
+    st.markdown("### Product Details Table")
+    st.dataframe(df, width='stretch')
+
+    # ...existing code...
 
 def competitor_comparison(analyzer, product_name):
     """Compare product with competitors in same source and nearby price range."""
@@ -211,37 +258,34 @@ def competitor_comparison(analyzer, product_name):
     # Competitor price comparison chart
     fig = px.bar(comp, x="product_name", y="price", color="price",
                  title=f"Competitor Price Comparison ({source})")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, config={"responsive": True})
 
     # Competitor table
     st.dataframe(comp[["product_name", "price", "discount", "rating", "url"]])
 
-    # Interactive selection
-    st.markdown("### Explore Competitors Near Selected Product Price")
-    selected_product = st.selectbox("Select competitor product", comp["product_name"].unique())
+    # Use sidebar-selected product for nearby comparison
+    selected_product = product_name
+    selected_price = analyzer.products_df.query("product_name==@selected_product")["price"].values[0]
+    st.markdown(f"Showing products around ₹{selected_price}")
 
-    if selected_product:
-        selected_price = comp.query("product_name==@selected_product")["price"].values[0]
-        st.markdown(f"*Showing products around ₹{selected_price}*")
+    lower_bound, upper_bound = selected_price * 0.8, selected_price * 1.2
+    nearby_products = analyzer.products_df.query(
+        "price >= @lower_bound and price <= @upper_bound"
+    ).copy()
 
-        lower_bound, upper_bound = selected_price * 0.8, selected_price * 1.2
-        nearby_products = analyzer.products_df.query(
-            "price >= @lower_bound and price <= @upper_bound"
-        ).copy()
+    sentiment_scores = []
+    for prod in nearby_products["product_name"]:
+        sentiment_info = analyzer.get_sentiment_analysis(prod)
+        sentiment_scores.append(sentiment_info["average_sentiment_score"] if sentiment_info else np.nan)
+    nearby_products["avg_sentiment"] = sentiment_scores
+    nearby_products.sort_values(by="avg_sentiment", ascending=False, inplace=True)
 
-        sentiment_scores = []
-        for prod in nearby_products["product_name"]:
-            sentiment_info = analyzer.get_sentiment_analysis(prod)
-            sentiment_scores.append(sentiment_info["average_sentiment_score"] if sentiment_info else np.nan)
-        nearby_products["avg_sentiment"] = sentiment_scores
-        nearby_products.sort_values(by="avg_sentiment", ascending=False, inplace=True)
+    cols = ["product_name", "source", "price", "discount", "rating", "avg_sentiment", "url"]
+    st.dataframe(nearby_products[cols])
 
-        cols = ["product_name", "source", "price", "discount", "rating", "avg_sentiment", "url"]
-        st.dataframe(nearby_products[cols])
-
-        same_product_sources = analyzer.products_df.query("product_name==@selected_product")
-        st.markdown(f"'{selected_product}' Price & Discount Across Sources:")
-        st.dataframe(same_product_sources[["source", "price", "discount", "rating", "url"]])
+    same_product_sources = analyzer.products_df.query("product_name==@selected_product")
+    st.markdown(f"'{selected_product}' Price & Discount Across Sources:")
+    st.dataframe(same_product_sources[["source", "price", "discount", "rating", "url"]])
 
 
 def strategic_recommendations(analyzer, product_name):
@@ -281,7 +325,7 @@ def strategic_recommendations(analyzer, product_name):
     sentiment_class = "negative-sentiment" if avg_score < 0.2 else "neutral-sentiment" if avg_score < 0.5 else "positive-sentiment"
 
     st.markdown(
-        f"*Sentiment Status:* <span class='{sentiment_class}'>{sentiment_status}</span>",
+        f"Sentiment Status: <span class='{sentiment_class}'>{sentiment_status}</span>",
         unsafe_allow_html=True
     )
 
@@ -290,37 +334,45 @@ def strategic_recommendations(analyzer, product_name):
 
 
 def notifications_section(notifications_file="data/notifications.csv"):
-    """Show alerts logged by notification system."""
-    st.markdown('<div class="section-header">Notifications</div>', unsafe_allow_html=True)
-
-    if not os.path.exists(notifications_file):
-        st.info("No notifications available yet.")
+    st.info("🔔 Displaying notifications and alerts.")
+    if not os.path.exists(notifications_file) or os.path.getsize(notifications_file) == 0:
+        pd.DataFrame(columns=["timestamp", "type", "message", "hash"]).to_csv(notifications_file, index=False)
+        st.info("No notifications available.")
         return
-
-    df = pd.read_csv(notifications_file)
-    if df.empty:
-        st.info("No notifications to display.")
-        return
-
-    st.dataframe(df)
-
-    # Highlight last 5 alerts
-    st.markdown("### Recent Alerts")
-    for _, row in df.tail(5).iterrows():
-        st.write(f"- **[{row['timestamp']}]** {row['message']}")
-
+    try:
+        df = pd.read_csv(notifications_file)
+        if df.empty:
+            st.info("No notifications to display.")
+            return
+        st.dataframe(df, width='stretch')
+        st.markdown("### Recent Alerts")
+        for _, row in df.tail(5).iterrows():
+            st.write(f"- **[{row['timestamp']}]** {row['message']}")
+    except pd.errors.EmptyDataError:
+        st.info("No notifications available.")
 
 # ---------------- Main App ----------------
 def main():
     """Main entry point for Streamlit dashboard."""
-    st.markdown('<div class="main-header">E-Commerce Competitor Strategy Dashboard</div>',
-                unsafe_allow_html=True)
 
-    # Run the end-to-end pipeline once per session
+    # This block runs ONLY on the very first load of the session.
+    # It runs the pipeline, sets a flag, and then forces a fresh page load.
     if "pipeline_initialized" not in st.session_state:
+        st.markdown('<div class="main-header">E-Commerce Competitor Strategy Dashboard</div>', unsafe_allow_html=True)
         orchestrate_pipeline()
         st.session_state["pipeline_initialized"] = True
+        # This is the key change: it stops the script here and re-runs it from the top.
+        st.rerun()
 
+    # After the rerun, the code above is skipped, and this part runs.
+    # It will show the login UI on a clean page until the user is logged in.
+    import login
+    if not login.is_logged_in():
+        login.show_login_ui()
+        st.stop()
+
+    # This part only runs AFTER a successful login.
+    st.markdown('<div class="main-header">E-Commerce Competitor Strategy Dashboard</div>', unsafe_allow_html=True)
     analyzer = CompetitorAnalyzer()
     if not analyzer.load_data():
         st.stop()
