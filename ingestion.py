@@ -4,14 +4,21 @@ import pandas as pd
 from datetime import datetime, timedelta
 import re
 import os
+import logging
 from textblob import TextBlob  # for sentiment analysis
+import lightgbm as lgb
+import joblib
 
 # ---------------- CONFIG ----------------
-REVIEWS_FILE = "My_docs/review.csv"   # cleaned review input
-MOBILE_FILE = "My_docs/mobile.csv"    # scraped mobile data input
-OUTPUT_REVIEWS = "cleaned_reviews.csv"
-OUTPUT_MOBILE = "cleaned_mobile.csv"
-os.makedirs("data", exist_ok=True)
+REVIEWS_FILE = os.getenv("REVIEWS_FILE", "my_docs/review.csv")   # cleaned review input
+MOBILE_FILE = os.getenv("MOBILE_FILE", "my_docs/mobile.csv")    # scraped mobile data input
+OUTPUT_REVIEWS = os.getenv("OUTPUT_REVIEWS", "cleaned_reviews.csv")
+OUTPUT_MOBILE = os.getenv("OUTPUT_MOBILE", "cleaned_mobile.csv")
+DATA_DIR = os.getenv("DATA_DIR", "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# ---------------- Logging Setup ----------------
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # ---------------- FUNCTIONS ----------------
 
@@ -19,7 +26,6 @@ def parse_relative_date(text):
     """Convert relative dates like '22 days ago' to absolute date safely"""
     text = str(text).strip().lower()
     now = datetime.now()
-
     try:
         if "day" in text:
             match = re.search(r"(\d+)", text)
@@ -75,7 +81,6 @@ def clean_mobile(df):
     df['discountoffering'] = df['discountoffering'].astype(str).str.replace('% off','',regex=False).str.strip()
     df['discountoffering'] = pd.to_numeric(df['discountoffering'], errors='coerce')
     df['rating'] = pd.to_numeric(df['rating'], errors='coerce')
-    # Ensure scraped_at is datetime
     df['scraped_at'] = pd.to_datetime(df['scraped_at'], errors='coerce')
     df = df.drop_duplicates(subset=['productid', 'scraped_at'], keep='last')
     return df
@@ -83,37 +88,55 @@ def clean_mobile(df):
 # ---------------- MAIN ----------------
 
 def main():
-    valid_product_ids = set()
-
     # -------- Load and Clean Mobile Data --------
     if os.path.exists(MOBILE_FILE):
         df_mobile = pd.read_csv(MOBILE_FILE)
-        print(f"Raw mobile data: {len(df_mobile)} rows")
+        logging.info(f"Raw mobile data: {len(df_mobile)} rows")
         df_mobile_clean = clean_mobile(df_mobile)
         valid_product_ids = set(df_mobile_clean['productid'].dropna().unique())
-        print(f"Cleaned mobile data: {len(df_mobile_clean)} rows")
-        df_mobile_clean.to_csv(os.path.join("data", OUTPUT_MOBILE), index=False, encoding="utf-8-sig")
-        print(f"✅ Cleaned mobile data saved: data/{OUTPUT_MOBILE}")
+        logging.info(f"Cleaned mobile data: {len(df_mobile_clean)} rows")
+        df_mobile_clean.to_csv(os.path.join(DATA_DIR, OUTPUT_MOBILE), index=False, encoding="utf-8-sig")
+        logging.info(f"✅ Cleaned mobile data saved: {DATA_DIR}/{OUTPUT_MOBILE}")
+
+        train_price_model_lgbm(df_mobile_clean)
     else:
-        print(f"Mobile file not found: {MOBILE_FILE}")
+        logging.warning(f"Mobile file not found: {MOBILE_FILE}")
 
     # -------- Load and Clean Reviews --------
     if os.path.exists(REVIEWS_FILE):
         df_reviews = pd.read_csv(REVIEWS_FILE)
-        print(f"Raw reviews: {len(df_reviews)} rows")
+        logging.info(f"Raw reviews: {len(df_reviews)} rows")
 
         # ✅ Filter only reviews whose productid exists in mobiles.csv
         if valid_product_ids:
             before = len(df_reviews)
             df_reviews = df_reviews[df_reviews['productid'].isin(valid_product_ids)]
-            print(f"Filtered reviews by productid: {len(df_reviews)} rows (kept {len(df_reviews)}/{before})")
+            logging.info(f"Filtered reviews by productid: {len(df_reviews)} rows (kept {len(df_reviews)}/{before})")
 
         df_reviews_clean = clean_reviews(df_reviews)
-        print(f"Cleaned reviews: {len(df_reviews_clean)} rows")
-        df_reviews_clean.to_csv(os.path.join("data", OUTPUT_REVIEWS), index=False, encoding="utf-8-sig")
-        print(f"✅ Cleaned reviews saved: data/{OUTPUT_REVIEWS}")
+        logging.info(f"Cleaned reviews: {len(df_reviews_clean)} rows")
+        df_reviews_clean.to_csv(os.path.join(DATA_DIR, OUTPUT_REVIEWS), index=False, encoding="utf-8-sig")
+        logging.info(f"✅ Cleaned reviews saved: {DATA_DIR}/{OUTPUT_REVIEWS}")
     else:
-        print(f"Reviews file not found: {REVIEWS_FILE}")
+        logging.warning(f"Reviews file not found: {REVIEWS_FILE}")
+
+def train_price_model_lgbm(mobile_df):
+    features = ["discountoffering", "rating"]
+    # Ensure columns exist and are numeric
+    for col in features:
+        if col not in mobile_df.columns:
+            logging.warning(f"Missing column for ML: {col}")
+            return
+    mobile_df = mobile_df.dropna(subset=["sellingprice", "discountoffering", "rating"])
+    if len(mobile_df) < 10:
+        logging.warning("Not enough data to train LightGBM model.")
+        return
+    X = mobile_df[features]
+    y = mobile_df["sellingprice"]
+    model = lgb.LGBMRegressor(n_estimators=100, random_state=42)
+    model.fit(X, y)
+    joblib.dump(model, "data/price_predictor_lgbm.joblib")
+    logging.info("✅ LightGBM price prediction model trained and saved.")
 
 if __name__ == "__main__":
     main()
