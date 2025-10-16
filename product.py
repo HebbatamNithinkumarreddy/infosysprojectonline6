@@ -1,9 +1,9 @@
 """
 Simplified production-ready Flipkart scraper
-(Intern-friendly, ~180 lines, saves to My_docs/ folder)
+(Intern-friendly, saves to my_docs/ folder)
 """
 
-import os, re, time
+import os, re, time, logging
 from datetime import datetime
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -19,13 +19,18 @@ from webdriver_manager.chrome import ChromeDriverManager
 # CONFIG
 # ------------------------------
 SEARCH_URL = "https://www.flipkart.com/search?q=mobiles&page={}"
-LISTING_PAGES = 3       # number of search pages
-REVIEW_PAGES = 2        # reviews per product
-WAIT = 3                # wait after page load
-OUTPUT_DIR = "My_docs"  # save folder
+LISTING_PAGES = int(os.getenv("LISTING_PAGES", 3))
+REVIEW_PAGES = int(os.getenv("REVIEW_PAGES", 2))
+WAIT = int(os.getenv("WAIT", 3))
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", "my_docs")
 
 # ensure output folder
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ------------------------------
+# Logging setup
+# ------------------------------
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # ------------------------------
 # Selenium setup
@@ -37,7 +42,6 @@ options.add_argument("--no-sandbox")
 options.add_argument("--disable-dev-shm-usage")
 options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
-# Use webdriver-manager to fetch a compatible ChromeDriver automatically
 driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
 
 # ------------------------------
@@ -57,7 +61,7 @@ def save_csv(df_new, path, subset_cols):
     if subset_cols:
         df = df.drop_duplicates(subset=subset_cols, keep="last")
     df.to_csv(path, index=False, encoding="utf-8-sig")
-    print(f"✅ Saved {len(df_new)} new rows (total {len(df)}) → {path}")
+    logging.info(f"Saved {len(df_new)} new rows (total {len(df)}) → {path}")
 
 # ------------------------------
 # Step 1: Collect product listings
@@ -66,7 +70,7 @@ mobile_rows, product_links = [], set()
 scraped_at = datetime.utcnow().isoformat()
 
 for page in range(1, LISTING_PAGES + 1):
-    print(f"📄 Scraping listing page {page}")
+    logging.info(f"Scraping listing page {page}")
     driver.get(SEARCH_URL.format(page))
     time.sleep(WAIT)
     soup = BeautifulSoup(driver.page_source, "lxml")
@@ -126,7 +130,7 @@ for pid, name, url in product_links:
             continue
 
         reviews_base = "https://www.flipkart.com" + all_reviews["href"]
-        print(f"💬 Scraping reviews for {name}")
+        logging.info(f"Scraping reviews for {name}")
 
         for rpage in range(1, REVIEW_PAGES + 1):
             driver.get(f"{reviews_base}&page={rpage}")
@@ -156,7 +160,7 @@ for pid, name, url in product_links:
                 })
             time.sleep(1)
     except Exception as e:
-        print(f"⚠ Error scraping {name}: {e}")
+        logging.warning(f"Error scraping {name}: {e}")
 
 driver.quit()
 
@@ -171,4 +175,4 @@ try:
     import ingestion
     ingestion.main()
 except ImportError:
-    print("ℹ ingestion.py not found, skipping ingestion step.")
+    logging.info("ingestion.py not found, skipping ingestion step.")
